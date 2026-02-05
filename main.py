@@ -1,12 +1,10 @@
 import os
 import re
 import uuid
-import time
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 
 # ------------------ CONFIG ------------------
 
@@ -21,9 +19,11 @@ app = FastAPI(title="Agentic Scam Honeypot", version="1.0")
 
 # ------------------ AUTH ------------------
 
-def verify_api_key(x_api_key: str = Header(...)):
+def verify_api_key(x_api_key: str = Header(None)):
     if not HACKATHON_API_KEY:
         raise HTTPException(status_code=500, detail="Server API key not configured")
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing API Key")
     if x_api_key != HACKATHON_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
@@ -31,19 +31,7 @@ def verify_api_key(x_api_key: str = Header(...)):
 
 sessions: Dict[str, List[Dict[str, str]]] = {}
 
-# ------------------ MODELS (GUVI FORMAT) ------------------
 
-class IncomingMessage(BaseModel):
-    sender: str
-    text: str
-    timestamp: Optional[str | int] = None
-
-
-class IncomingRequest(BaseModel):
-    sessionId: Optional[str] = None
-    message: IncomingMessage
-    conversationHistory: Optional[list] = []
-    metadata: Optional[dict] = None
 
 # ------------------ INTELLIGENCE ------------------
 
@@ -94,20 +82,27 @@ def is_scam(intel: Intelligence) -> bool:
 # ------------------ API ------------------
 
 @app.post("/chat", dependencies=[Depends(verify_api_key)])
-def chat(req: IncomingRequest):
-    # Create or load session
-    if not req.sessionId:
-        session_id = str(uuid.uuid4())
+async def chat(request: Request):
+    # Safely read JSON (even if GUVI sends empty or different body)
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    session_id = body.get("sessionId") or str(uuid.uuid4())
+
+    if session_id not in sessions:
         sessions[session_id] = []
-    else:
-        session_id = req.sessionId
-        if session_id not in sessions:
-            sessions[session_id] = []
 
-    user_text = req.message.text
+    # Safely extract message text
+    text = ""
+    try:
+        text = body.get("message", {}).get("text", "")
+    except:
+        text = ""
 
-    # Save user message
-    sessions[session_id].append({"role": "user", "message": user_text})
+    if text:
+        sessions[session_id].append({"role": "user", "message": text})
 
     # Extract intelligence
     intel = Intelligence()
@@ -116,12 +111,12 @@ def chat(req: IncomingRequest):
 
     scam_detected = is_scam(intel)
 
-    
+    # GUVI-required reply
     agent_reply = "Why is my account being suspended?"
 
     sessions[session_id].append({"role": "agent", "message": agent_reply})
 
-    
+    # Prepare callback payload
     intelligence_dict = {
         "bankAccounts": list(intel.bankAccounts),
         "upiIds": list(intel.upiIds),
@@ -135,26 +130,27 @@ def chat(req: IncomingRequest):
         "scamDetected": scam_detected,
         "totalMessagesExchanged": len(sessions[session_id]),
         "extractedIntelligence": intelligence_dict,
-        "agentNotes": "Automated agentic honeypot analysis with multi-turn context."
+        "agentNotes": "Automated agentic honeypot analysis"
     }
 
-   
+    # Send callback (best effort)
     try:
         requests.post(HACKATHON_CALLBACK_URL, json=payload, timeout=5)
     except requests.exceptions.RequestException:
         pass
 
-    
+    # ✅ EXACT RESPONSE FORMAT GUVI EXPECTS
     return {
         "status": "success",
         "reply": agent_reply
     }
 
-
+# ------------------ HEALTH ------------------
 
 @app.get("/")
 def root():
 
     return {"status": "ok", "message": "Agentic Scam Honeypot Running"}
+
 
 
