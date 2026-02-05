@@ -36,7 +36,8 @@ sessions: Dict[str, List[Dict[str, str]]] = {}
 class IncomingMessage(BaseModel):
     sender: str
     text: str
-    timestamp: Optional[str] = None
+    timestamp: Optional[str | int] = None
+
 
 class IncomingRequest(BaseModel):
     sessionId: Optional[str] = None
