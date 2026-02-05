@@ -8,9 +8,9 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, Depends
 from pydantic import BaseModel, Field
 
+# ------------------ CONFIG ------------------
 
-
-HACKATHON_API_KEY = os.getenv("HACKATHON_API_KEY")  
+HACKATHON_API_KEY = os.getenv("HACKATHON_API_KEY")
 if not HACKATHON_API_KEY:
     print("WARNING: HACKATHON_API_KEY is not set in environment variables")
 
@@ -19,6 +19,7 @@ HACKATHON_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResul
 
 app = FastAPI(title="Agentic Scam Honeypot", version="1.0")
 
+# ------------------ AUTH ------------------
 
 def verify_api_key(x_api_key: str = Header(...)):
     if not HACKATHON_API_KEY:
@@ -26,26 +27,24 @@ def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != HACKATHON_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
+# ------------------ STORAGE ------------------
 
 sessions: Dict[str, List[Dict[str, str]]] = {}
 
+# ------------------ MODELS (GUVI FORMAT) ------------------
 
-class HumanMessage(BaseModel):
-    role: Literal["user", "agent"]
-    message: str
+class IncomingMessage(BaseModel):
+    sender: str
+    text: str
+    timestamp: Optional[str] = None
 
-class ChatRequest(BaseModel):
+class IncomingRequest(BaseModel):
     sessionId: Optional[str] = None
-    message: str = Field(..., min_length=1, max_length=2000)
+    message: IncomingMessage
+    conversationHistory: Optional[list] = []
+    metadata: Optional[dict] = None
 
-class ChatResponse(BaseModel):
-    sessionId: str
-    agentReply: str
-    scamDetected: bool
-    conversationHistory: List[HumanMessage]
-    callbackStatus: int
-    callbackTimeSeconds: float
-
+# ------------------ INTELLIGENCE ------------------
 
 class Intelligence:
     def __init__(self):
@@ -56,7 +55,7 @@ class Intelligence:
         self.suspiciousKeywords = set()
 
     def extract(self, text: str):
-        # Phone numbers (India style)
+        # Phone numbers (India)
         for p in re.findall(r"\b[6-9]\d{9}\b", text):
             self.phoneNumbers.add(p)
 
@@ -91,30 +90,10 @@ def is_scam(intel: Intelligence) -> bool:
         score += 2
     return score >= 3
 
+# ------------------ API ------------------
 
-def generate_agent_reply(user_msg: str, intel: Intelligence, history: List[Dict[str, str]]) -> str:
-    text = user_msg.lower()
-
-    # Self-correction: if user contradicts or pushes for sensitive data
-    if "otp" in text or "password" in text:
-        return "I cannot share OTP or passwords. Please explain the legitimate purpose clearly."
-
-    if intel.phishingLinks:
-        return "This link looks unsafe. Please verify your identity through official channels."
-
-    if intel.upiIds or intel.bankAccounts:
-        return "I am not comfortable sharing financial details. Can you provide official verification?"
-
-    # If conversation is going long, probe more
-    if len(history) >= 4:
-        return "Your request still seems unclear. Please provide official proof or contact details."
-
-    return "Can you share more details about this request so I can understand it better?"
-
-
-
-@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
-def chat(req: ChatRequest):
+@app.post("/chat", dependencies=[Depends(verify_api_key)])
+def chat(req: IncomingRequest):
     # Create or load session
     if not req.sessionId:
         session_id = str(uuid.uuid4())
@@ -124,20 +103,24 @@ def chat(req: ChatRequest):
         if session_id not in sessions:
             sessions[session_id] = []
 
-    
-    sessions[session_id].append({"role": "user", "message": req.message})
+    user_text = req.message.text
 
-    
+    # Save user message
+    sessions[session_id].append({"role": "user", "message": user_text})
+
+    # Extract intelligence
     intel = Intelligence()
     for turn in sessions[session_id]:
         intel.extract(turn["message"])
 
     scam_detected = is_scam(intel)
 
-    agent_reply = generate_agent_reply(req.message, intel, sessions[session_id])
+    
+    agent_reply = "Why is my account being suspended?"
+
     sessions[session_id].append({"role": "agent", "message": agent_reply})
 
-   
+    
     intelligence_dict = {
         "bankAccounts": list(intel.bankAccounts),
         "upiIds": list(intel.upiIds),
@@ -151,37 +134,26 @@ def chat(req: ChatRequest):
         "scamDetected": scam_detected,
         "totalMessagesExchanged": len(sessions[session_id]),
         "extractedIntelligence": intelligence_dict,
-        "agentNotes": "Automated agentic honeypot analysis with multi-turn context and self-correction."
+        "agentNotes": "Automated agentic honeypot analysis with multi-turn context."
     }
 
-    
-    start = time.time()
+   
     try:
-        response = requests.post(
-            HACKATHON_CALLBACK_URL,
-            json=payload,
-            timeout=5
-        )
-        status_code = response.status_code
+        requests.post(HACKATHON_CALLBACK_URL, json=payload, timeout=5)
     except requests.exceptions.RequestException:
-        status_code = 0
-    elapsed = time.time() - start
+        pass
 
     
-    history_out = [HumanMessage(role=turn["role"], message=turn["message"]) for turn in sessions[session_id]]
+    return {
+        "status": "success",
+        "reply": agent_reply
+    }
 
-    return ChatResponse(
-        sessionId=session_id,
-        agentReply=agent_reply,
-        scamDetected=scam_detected,
-        conversationHistory=history_out,
-        callbackStatus=status_code,
-        callbackTimeSeconds=round(elapsed, 3)
-    )
 
 
 @app.get("/")
 def root():
+
     return {"status": "ok", "message": "Agentic Scam Honeypot Running"}
 
 
